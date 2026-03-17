@@ -1,53 +1,56 @@
-import time
-import random
+import requests
+from bs4 import BeautifulSoup
 from database import SessionLocal
 from models import Product, PriceHistory
+import time
 
-def run_real_time_sync():
-    db = SessionLocal()
-    # Jin products ka data chahiye
-    products_to_sync = ["Tomato", "Onion", "Potato", "Ginger", "Lemon"]
+def fetch_online_price(product_name):
+    # BigBasket/Blinkit search URL (Example logic)
+    search_url = f"https://www.bigbasket.com/ps/?q={product_name}"
+    headers = {"User-Agent": "Mozilla/5.0"}
     
-    print("🔄 Syncing Real-time Prices...")
-    
-    for name in products_to_sync:
-        # DB mein product entry check karna
-        product = db.query(Product).filter_by(name=name).first()
-        if not product:
-            product = Product(name=name, base_unit="kg")
-            db.add(product)
-            db.commit()
-            db.refresh(product)
-
-        # REAL LOGIC: Yahan hum real mandi rates ko simulate kar rahe hain
-        # In Production: Yahan requests.get() aayega Govt API ke liye
-        base_mandi_price = random.uniform(20, 60) 
-        online_markup = random.uniform(1.2, 1.5) # Online 20-50% mehnga hota hai
-
-        # 1. Update Mandi Price
-        mandi_entry = PriceHistory(
-            product_id=product.id,
-            vendor="Local Mandi (Sangam Vihar)",
-            price=round(base_mandi_price, 2)
-        )
+    try:
+        response = requests.get(search_url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 2. Update Online Price (Blinkit/Zepto Proxy)
-        online_entry = PriceHistory(
-            product_id=product.id,
-            vendor="Blinkit/Zepto",
-            price=round(base_mandi_price * online_markup, 2)
-        )
+        # BigBasket ke HTML se price nikalne ka logic
+        # Note: Actual class names change hoti rehti hain, hum ise update karte rahenge
+        price_tag = soup.find("span", {"class": "discnt-price"}) 
+        if price_tag:
+            price_text = price_tag.text.replace("₹", "").strip()
+            return float(price_text)
+    except Exception as e:
+        print(f"Error fetching {product_name}: {e}")
+    
+    return None
 
-        db.add(mandi_entry)
-        db.add(online_entry)
-        print(f"✅ Updated {name}: Mandi ₹{round(base_mandi_price,1)} | Online ₹{round(base_mandi_price*online_markup,1)}")
-
-    db.commit()
+def update_all_prices():
+    db = SessionLocal()
+    products = db.query(Product).all()
+    
+    for prod in products:
+        print(f"Updating {prod.name}...")
+        real_price = fetch_online_price(prod.name)
+        
+        if real_price:
+            new_price = PriceHistory(
+                product_id=prod.id,
+                vendor="Online (BB/Blinkit)",
+                price=real_price
+            )
+            db.add(new_price)
+            # Mandi price logic: Usually Mandi is 30-40% cheaper
+            mandi_price = PriceHistory(
+                product_id=prod.id,
+                vendor="Local Mandi",
+                price=round(real_price * 0.65, 2)
+            )
+            db.add(mandi_price)
+            db.commit()
     db.close()
-    print("🚀 All Prices Synced!")
 
 if __name__ == "__main__":
     while True:
-        run_real_time_sync()
-        print("Sleeping for 1 hour...")
-        time.sleep(3600) # Har 1 ghante mein auto-run
+        update_all_prices()
+        print("Waiting 1 hour for next sync...")
+        time.sleep(3600)
